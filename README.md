@@ -6,4 +6,4 @@ Video streaming experiements with Web Sockets, SSE, Client HTTP Polling
 
 ### Additional Work:
 
-Implemented STUN server
+Implemented STUN server (minimal implementation of RFC-5389)

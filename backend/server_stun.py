@@ -75,3 +75,6 @@ class STUN(DatagramProtocol):
 
 reactor.listenUDP(9999, STUN())
 reactor.run()
+
+# STUN HEX Message
+#00 01 00 00 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae 
