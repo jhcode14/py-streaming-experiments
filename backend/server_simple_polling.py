@@ -1,5 +1,4 @@
-@ -1,49 +1,130 @@
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import pyautogui
 import base64
