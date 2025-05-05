@@ -1,165 +1,246 @@
 import { Button, TextField, Stack } from "@mui/material";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { io, Socket } from "socket.io-client";
+
+const URL = "http://localhost:3000";
+const RTCP_CONFIG = {
+  iceServers: [
+    {
+      urls: "stun:stun.l.google.com:19302",
+    },
+  ],
+};
 
 function App() {
-  const rtcpConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const localVideo = useRef<HTMLVideoElement>(null);
-  const remoteVideo = useRef<HTMLVideoElement>(null);
+  const [roomName, setRoomName] = useState("");
+  const rtcpConnectionMapRef = useRef<Map<string, RTCPeerConnection>>(
+    new Map()
+  );
+  const socketRef = useRef<Socket | null>(null);
+  const localMediaRef = useRef<MediaStream | null>(null);
 
-  // Input field states
-  const [yourOffer, setYourOffer] = useState("");
-  const [peerOffer, setPeerOffer] = useState("");
-  const [yourAnswer, setYourAnswer] = useState("");
-  const [peerAnswer, setPeerAnswer] = useState("");
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(
+    new Map()
+  );
 
-  // Button click handlers
-  const handleCreateOffer = async () => {
-    await createOffer();
-    // TODO: Set the offer in the yourOffer state
-  };
+  const handlePeers = async (ids: string[]) => {
+    console.log(`Handling peers: ${ids.join(", ")}`);
+    for (const id of ids) {
+      if (!rtcpConnectionMapRef.current.has(id)) {
+        // create new rtcpconnection if it dosen't already exist
+        console.log(`Creating new RTCPeerConnection for peer ${id}`);
+        const newConnection = new RTCPeerConnection(RTCP_CONFIG);
 
-  const handleCreateAnswer = async () => {
-    await createAnswer();
-    // TODO: Implement create answer logic
-  };
+        rtcpConnectionMapRef.current.set(id, newConnection);
+        for (const track of localMediaRef.current!.getTracks()) {
+          rtcpConnectionMapRef.current
+            .get(id)
+            ?.addTrack(track, localMediaRef.current!);
+        }
+        console.log(`Added local tracks to peer ${id}`);
 
-  const handleConsumeAnswer = async () => {
-    await consumeAnswer();
-    // TODO: Implement consume answer logic
-  };
+        newConnection.ontrack = (e: RTCTrackEvent) => {
+          const stream = e.streams[0];
+          console.log(`Received track from peer ${id}`);
+          setRemoteStreams((prev) => new Map(prev).set(id, stream));
+        };
 
-  const createOffer = async () => {
-    // check rtcp connection already exists, if not, create
-    if (rtcpConnectionRef.current == null) {
-      rtcpConnectionRef.current = new RTCPeerConnection({
-        iceServers: [
-          {
-            urls: "stun:stun.l.google.com:19302",
-          },
-        ],
-      });
+        // add event to add ip to offer
+        newConnection.onicecandidate = (e: RTCPeerConnectionIceEvent) => {
+          if (e.candidate == null) {
+            console.log(`ICE candidate found for peer ${id}`, e.candidate);
+            socketRef.current!.emit(
+              "sendOffer",
+              id,
+              newConnection.localDescription?.sdp
+            );
+          }
+        };
+
+        // create offer
+        console.log(`Creating offer for peer ${id}`);
+        const offer = await newConnection.createOffer();
+        await newConnection.setLocalDescription(offer);
+        console.log(`Set local description for peer ${id}`);
+      }
     }
-    const media = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
-    for (const track of media.getTracks()) {
-      rtcpConnectionRef.current.addTrack(track, media);
-    }
-    localVideo.current!.srcObject = media;
+  };
 
-    rtcpConnectionRef.current.ontrack = (e: RTCTrackEvent) => {
-      const streams = e.streams[0];
-      remoteVideo.current!.srcObject = streams;
+  const handleOffer = async (senderId: string, offer: string) => {
+    // got offer, now return an answer
+    console.log(`Received offer from ${senderId}`);
+    //create connection if does not exist
+    if (!rtcpConnectionMapRef.current.has(senderId)) {
+      console.log(
+        `Creating new RTCPeerConnection for peer ${senderId} (from offer)`
+      );
+      rtcpConnectionMapRef.current.set(
+        senderId,
+        new RTCPeerConnection(RTCP_CONFIG)
+      );
+    }
+    const connection = rtcpConnectionMapRef.current.get(senderId);
+
+    connection!.ontrack = (e: RTCTrackEvent) => {
+      const stream = e.streams[0];
+      console.log(`Received track from peer ${senderId}`);
+      setRemoteStreams((prev) => new Map(prev).set(senderId, stream));
     };
 
-    rtcpConnectionRef.current.onicecandidate = (
-      e: RTCPeerConnectionIceEvent
-    ) => {
-      if (e.candidate !== null) {
-        setYourOffer(rtcpConnectionRef.current?.localDescription?.sdp ?? "");
+    //add your track to connections
+    for (const track of localMediaRef.current!.getTracks()) {
+      connection!.addTrack(track, localMediaRef.current!);
+    }
+    console.log(`Added local tracks to peer ${senderId}`);
+
+    connection!.onicecandidate = (e: RTCPeerConnectionIceEvent) => {
+      if (e.candidate == null) {
+        console.log(
+          `ICE candidate found for peer ${senderId} (from offer)`,
+          e.candidate
+        );
+        socketRef.current?.emit(
+          "sendAnswer",
+          senderId,
+          connection!.localDescription?.sdp ?? ""
+        );
       }
     };
 
-    const offer = await rtcpConnectionRef.current.createOffer();
-    await rtcpConnectionRef.current.setLocalDescription(offer);
+    //store offer in remote
+    console.log(`Setting remote description from offer for peer ${senderId}`);
+    await connection!.setRemoteDescription(
+      new RTCSessionDescription({ type: "offer", sdp: offer })
+    );
+
+    //generate answer
+    console.log(`Creating answer for peer ${senderId}`);
+    const answer = await connection!.createAnswer();
+
+    //store answer
+    await connection!.setLocalDescription(new RTCSessionDescription(answer));
+    console.log(`Set local description (answer) for peer ${senderId}`);
   };
 
-  const createAnswer = async () => {
-    // check rtcp connection already exists, if not, create
-    if (rtcpConnectionRef.current == null) {
-      rtcpConnectionRef.current = new RTCPeerConnection({
-        iceServers: [
-          {
-            urls: "stun:stun.l.google.com:19302",
-          },
-        ],
+  const handleAnswer = async (senderId: string, answer: string) => {
+    console.log(`Received answer from ${senderId}`);
+    //store answer
+    if (!rtcpConnectionMapRef.current.has(senderId)) {
+      console.log("Connection not found for sender", senderId);
+      return;
+    }
+    // store answer
+    console.log(`Setting remote description from answer for peer ${senderId}`);
+    await rtcpConnectionMapRef.current
+      .get(senderId)
+      ?.setRemoteDescription(
+        new RTCSessionDescription({ type: "answer", sdp: answer })
+      );
+    console.log(`Successfully set remote description for peer ${senderId}`);
+  };
+
+  useEffect(() => {
+    socketRef.current = io(URL);
+
+    const init = async () => {
+      localMediaRef.current = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
       });
-    }
-    const media = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
-    for (const track of media.getTracks()) {
-      rtcpConnectionRef.current.addTrack(track, media);
-    }
-    localVideo.current!.srcObject = media;
+      localVideoRef.current!.srcObject = localMediaRef.current;
 
-    rtcpConnectionRef.current.ontrack = (e: RTCTrackEvent) => {
-      const streams = e.streams[0];
-      remoteVideo.current!.srcObject = streams;
+      socketRef.current!.on("connect", () => {
+        console.log("connected to server");
+      });
+
+      socketRef.current!.on("onclose", () => {
+        console.log("disconnected from server");
+      });
+
+      socketRef.current!.on("peers", (ids: string[]) => {
+        handlePeers(ids);
+      });
+
+      socketRef.current!.on("offer", (id: string, offer: string) => {
+        handleOffer(id, offer);
+      });
+
+      socketRef.current!.on("answer", (id: string, answer: string) => {
+        handleAnswer(id, answer);
+      });
+
+      socketRef.current!.on("someoneDisconnected", (id: string) => {
+        const handlePeerDisconnected = (userId: string) => {
+          setRemoteStreams((previous) => {
+            const newMap = new Map(previous);
+            newMap.delete(userId);
+            return newMap;
+          });
+          rtcpConnectionMapRef.current.delete(userId);
+        };
+        handlePeerDisconnected(id);
+      });
+
+      socketRef.current!.on("error", (event) => {
+        console.error("error", event);
+      });
     };
 
-    rtcpConnectionRef.current.setRemoteDescription(
-      new RTCSessionDescription({ type: "offer", sdp: peerOffer })
-    );
+    init();
 
-    rtcpConnectionRef.current.onicecandidate = (
-      e: RTCPeerConnectionIceEvent
-    ) => {
-      if (e.candidate !== null) {
-        setYourAnswer(rtcpConnectionRef.current?.localDescription?.sdp ?? "");
-      }
+    return () => {
+      socketRef.current!.close();
     };
+  }, []);
 
-    const answer = await rtcpConnectionRef.current.createAnswer();
-    await rtcpConnectionRef.current.setLocalDescription(answer);
-  };
-
-  const consumeAnswer = async () => {
-    rtcpConnectionRef.current?.setRemoteDescription(
-      new RTCSessionDescription({ type: "answer", sdp: peerAnswer })
-    );
+  const handleJoinRoom = () => {
+    // sent event join room
+    socketRef.current!.emit("join", roomName);
   };
 
   return (
     <>
-      <h1>WebRTC Demo</h1>
-      <Stack spacing={1}>
-        <Button variant="contained" onClick={handleCreateOffer}>
-          Create Offer
+      <Stack spacing={2}>
+        <div>
+          <h3>Local Video</h3>
+          <video ref={localVideoRef} autoPlay muted playsInline />
+        </div>
+
+        {Array.from(remoteStreams.entries()).length > 0 && (
+          <div>
+            <h3>Remote Videos</h3>
+            <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap" }}>
+              {Array.from(remoteStreams.entries()).map(([id, stream]) => (
+                <div key={id}>
+                  <video
+                    autoPlay
+                    playsInline
+                    ref={(element) => {
+                      if (element) {
+                        element.srcObject = stream;
+                      }
+                    }}
+                    style={{ width: "300px", height: "225px" }}
+                  />
+                </div>
+              ))}
+            </Stack>
+          </div>
+        )}
+
+        <Button variant="contained" onClick={handleJoinRoom}>
+          Join Button
         </Button>
         <TextField
           id="outlined-basic"
-          label="Your Offer"
+          label="Room Name"
           variant="outlined"
           multiline
-          value={yourOffer}
-          onChange={(e) => setYourOffer(e.target.value)}
-        />
-        <Button variant="contained" onClick={handleCreateAnswer}>
-          Create Answer
-        </Button>
-        <TextField
-          id="outlined-basic"
-          label="Peer's Offer"
-          variant="outlined"
-          multiline
-          value={peerOffer}
-          onChange={(e) => setPeerOffer(e.target.value)}
-        />
-        <TextField
-          id="outlined-basic"
-          label="Your Answer"
-          variant="outlined"
-          multiline
-          value={yourAnswer}
-          onChange={(e) => setYourAnswer(e.target.value)}
-        />
-        <Button variant="contained" onClick={handleConsumeAnswer}>
-          Consume Answer
-        </Button>
-        <TextField
-          id="outlined-basic"
-          label="Peer's Answer"
-          variant="outlined"
-          multiline
-          value={peerAnswer}
-          onChange={(e) => setPeerAnswer(e.target.value)}
+          value={roomName}
+          onChange={(e) => setRoomName(e.target.value)}
         />
       </Stack>
-      <video autoPlay playsInline ref={localVideo}></video>
-      <video autoPlay playsInline ref={remoteVideo}></video>
     </>
   );
 }
